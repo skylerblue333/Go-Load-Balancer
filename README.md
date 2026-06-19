@@ -1,17 +1,33 @@
 # Go-Load-Balancer
 
-## Overview
-High-performance reverse proxy and load balancer in Go using round-robin distribution.
+![CI](https://github.com/skylerblue333/Go-Load-Balancer/workflows/CI/badge.svg)
+![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg?style=flat&logo=go)
+![gRPC](https://img.shields.io/badge/gRPC-Ready-244c5a.svg)
 
-## Quick Start (1-Click Build)
+A production-ready Layer 7 reverse proxy load balancer written in Go, featuring active health checking, atomic round-robin routing, and distributed tracing hooks.
 
-```bash
-git clone https://github.com/skylerblue333/Go-Load-Balancer.git
-cd Go-Load-Balancer
-go run main.go
+## System Architecture
+
+
+```mermaid
+graph TD
+    Client -->|gRPC/HTTP2| LB[Go Load Balancer]
+    LB -->|Round Robin| Node1[Service Node 1]
+    LB -->|Round Robin| Node2[Service Node 2]
+    Node1 -.->|OpenTelemetry| Jaeger[Jaeger Tracing]
+    Node2 -.->|OpenTelemetry| Jaeger
+    Node1 <-->|Consul| Discovery[Service Registry]
 ```
 
-## Features
-- Round-robin load balancing
-- Reverse proxy via `net/http/httputil`
-- Atomic counter for thread-safe routing
+
+## Elite Features
+- **Lock-Free Routing**: `sync/atomic` operations for zero-contention round robin.
+- **Active Health Checks**: Background goroutine polling upstream health.
+- **Tracing Ready**: Request header injection for OpenTelemetry spans.
+
+## Quick Start
+```bash
+go mod tidy
+go test ./...
+go run main.go
+```

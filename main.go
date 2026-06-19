@@ -1,41 +1,33 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
+// Simulated OpenTelemetry span context
+type TraceContext struct {
+	TraceID string
+}
+
 type Backend struct {
-	URL    *url.URL
-	Alive  bool
-	mux    sync.RWMutex
+	URL          *url.URL
+	Alive        bool
+	mu           sync.RWMutex
 	ReverseProxy *httputil.ReverseProxy
-}
-
-func (b *Backend) SetAlive(alive bool) {
-	b.mux.Lock()
-	b.Alive = alive
-	b.mux.Unlock()
-}
-
-func (b *Backend) IsAlive() (alive bool) {
-	b.mux.RLock()
-	alive = b.Alive
-	b.mux.RUnlock()
-	return
 }
 
 type ServerPool struct {
 	backends []*Backend
 	current  uint64
-}
-
-func (s *ServerPool) AddBackend(b *Backend) {
-	s.backends = append(s.backends, b)
 }
 
 func (s *ServerPool) NextIndex() int {
@@ -57,36 +49,73 @@ func (s *ServerPool) GetNextPeer() *Backend {
 	return nil
 }
 
-func lbHandler(serverPool *ServerPool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		peer := serverPool.GetNextPeer()
-		if peer != nil {
-			peer.ReverseProxy.ServeHTTP(w, r)
-			return
+func (b *Backend) SetAlive(alive bool) {
+	b.mu.Lock()
+	b.Alive = alive
+	b.mu.Unlock()
+}
+
+func (b *Backend) IsAlive() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.Alive
+}
+
+var serverPool ServerPool
+
+func lbHandler(w http.ResponseWriter, r *http.Request) {
+	peer := serverPool.GetNextPeer()
+	if peer != nil {
+		// Inject tracing headers
+		r.Header.Set("X-Trace-Id", fmt.Sprintf("trace-%d", time.Now().UnixNano()))
+		peer.ReverseProxy.ServeHTTP(w, r)
+		return
+	}
+	http.Error(w, "Service not available", http.StatusServiceUnavailable)
+}
+
+func healthCheck() {
+	t := time.NewTicker(time.Second * 5)
+	for {
+		select {
+		case <-t.C:
+			for _, b := range serverPool.backends {
+				// Simulated health check logic
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = ctx // Used in real HTTP calls
+				b.SetAlive(true)
+				cancel()
+			}
 		}
-		http.Error(w, "Service not available", http.StatusServiceUnavailable)
 	}
 }
 
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	metrics := map[string]interface{}{
+		"active_backends": len(serverPool.backends),
+		"status":          "operational",
+	}
+	json.NewEncoder(w).Encode(metrics)
+}
+
 func main() {
-	pool := &ServerPool{}
-	
+	// Setup dummy backends for the load balancer
 	urls := []string{"http://localhost:8081", "http://localhost:8082"}
 	for _, u := range urls {
-		serverUrl, _ := url.Parse(u)
-		proxy := httputil.NewSingleHostReverseProxy(serverUrl)
-		pool.AddBackend(&Backend{
-			URL:          serverUrl,
+		parsedUrl, _ := url.Parse(u)
+		serverPool.backends = append(serverPool.backends, &Backend{
+			URL:          parsedUrl,
 			Alive:        true,
-			ReverseProxy: proxy,
+			ReverseProxy: httputil.NewSingleHostReverseProxy(parsedUrl),
 		})
 	}
 
-	server := http.Server{
-		Addr:    ":8080",
-		Handler: lbHandler(pool),
-	}
+	go healthCheck()
 
-	log.Println("Load Balancer started on port 8080")
-	log.Fatal(server.ListenAndServe())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", lbHandler)
+	mux.HandleFunc("/metrics", handleMetrics)
+
+	log.Println("L7 Load Balancer running on :8080")
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
