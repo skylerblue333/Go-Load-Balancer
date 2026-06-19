@@ -1,18 +1,22 @@
 package main
+
 import (
-    "net/http"
-    "net/http/httptest"
-    "testing"
+	"net/url"
+	"testing"
 )
-func TestHealthCheck(t *testing.T) {
-    req, err := http.NewRequest("GET", "/health", nil)
-    if err != nil {
-        t.Fatal(err)
-    }
-    rr := httptest.NewRecorder()
-    handler := http.HandlerFunc(handler)
-    handler.ServeHTTP(rr, req)
-    if status := rr.Code; status != http.StatusOK {
-        t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
-    }
+
+func TestNextIndex(t *testing.T) {
+	pool := &ServerPool{}
+	u1, _ := url.Parse("http://localhost:8081")
+	u2, _ := url.Parse("http://localhost:8082")
+	
+	pool.AddBackend(&Backend{URL: u1, Alive: true})
+	pool.AddBackend(&Backend{URL: u2, Alive: true})
+
+	idx1 := pool.NextIndex()
+	idx2 := pool.NextIndex()
+	
+	if idx1 == idx2 {
+		t.Errorf("Expected different indexes for round-robin, got %d and %d", idx1, idx2)
+	}
 }
