@@ -1,33 +1,34 @@
 # Go-Load-Balancer
 
-![CI](https://github.com/skylerblue333/Go-Load-Balancer/workflows/CI/badge.svg)
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8.svg?style=flat&logo=go)
-![gRPC](https://img.shields.io/badge/gRPC-Ready-244c5a.svg)
+High-performance reverse proxy and load balancer in Go.
 
-A production-ready Layer 7 reverse proxy load balancer written in Go, featuring active health checking, atomic round-robin routing, and distributed tracing hooks.
+## 🚀 Overview
+This repository contains a professional implementation of **Go Load Balancer**. It is designed with clean code principles and focuses on functionality and reliability.
 
-## System Architecture
+## 🛠️ Tech Stack
+- **Primary Language**: Go
+- **Environment**: Node.js / Python / Rust (as applicable)
+- **Key Features**: 
+  - Modular architecture
+  - Clean implementation of core logic
+  - Scalable design
 
+## 📂 Getting Started
 
-```mermaid
-graph TD
-    Client -->|gRPC/HTTP2| LB[Go Load Balancer]
-    LB -->|Round Robin| Node1[Service Node 1]
-    LB -->|Round Robin| Node2[Service Node 2]
-    Node1 -.->|OpenTelemetry| Jaeger[Jaeger Tracing]
-    Node2 -.->|OpenTelemetry| Jaeger
-    Node1 <-->|Consul| Discovery[Service Registry]
-```
+### Prerequisites
+- Ensure you have the latest version of the relevant runtime (Node.js, Python, or Rust) installed.
 
-
-## Elite Features
-- **Lock-Free Routing**: `sync/atomic` operations for zero-contention round robin.
-- **Active Health Checks**: Background goroutine polling upstream health.
-- **Tracing Ready**: Request header injection for OpenTelemetry spans.
-
-## Quick Start
+### Installation
 ```bash
-go mod tidy
-go test ./...
-go run main.go
+git clone https://github.com/skylerblue333/Go-Load-Balancer.git
+cd Go-Load-Balancer
 ```
+
+### Usage
+Follow the specific language conventions to run the project (e.g., `npm install`, `cargo build`, or `pip install -r requirements.txt`).
+
+## 🛡️ License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+Built by [Skyler Blue](https://github.com/skylerblue333)
