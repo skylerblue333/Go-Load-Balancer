@@ -1,22 +1,20 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// Simulated OpenTelemetry span context
-type TraceContext struct {
-	TraceID string
-}
+const healthTimeout = 2 * time.Second
 
 type Backend struct {
 	URL          *url.URL
@@ -31,18 +29,20 @@ type ServerPool struct {
 }
 
 func (s *ServerPool) NextIndex() int {
-	return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
+	if len(s.backends) == 0 {
+		return -1
+	}
+	return int(atomic.AddUint64(&s.current, 1)-1) % len(s.backends)
 }
 
 func (s *ServerPool) GetNextPeer() *Backend {
+	if len(s.backends) == 0 {
+		return nil
+	}
 	next := s.NextIndex()
-	l := len(s.backends) + next
-	for i := next; i < l; i++ {
-		idx := i % len(s.backends)
+	for offset := 0; offset < len(s.backends); offset++ {
+		idx := (next + offset) % len(s.backends)
 		if s.backends[idx].IsAlive() {
-			if i != next {
-				atomic.StoreUint64(&s.current, uint64(idx))
-			}
 			return s.backends[idx]
 		}
 	}
@@ -61,61 +61,102 @@ func (b *Backend) IsAlive() bool {
 	return b.Alive
 }
 
+func (b *Backend) Check(client *http.Client) bool {
+	request, err := http.NewRequest(http.MethodGet, b.URL.String(), nil)
+	if err != nil {
+		b.SetAlive(false)
+		return false
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		b.SetAlive(false)
+		return false
+	}
+	defer response.Body.Close()
+	alive := response.StatusCode < http.StatusInternalServerError
+	b.SetAlive(alive)
+	return alive
+}
+
 var serverPool ServerPool
 
 func lbHandler(w http.ResponseWriter, r *http.Request) {
 	peer := serverPool.GetNextPeer()
-	if peer != nil {
-		// Inject tracing headers
-		r.Header.Set("X-Trace-Id", fmt.Sprintf("trace-%d", time.Now().UnixNano()))
-		peer.ReverseProxy.ServeHTTP(w, r)
+	if peer == nil {
+		http.Error(w, "no healthy backend is available", http.StatusServiceUnavailable)
 		return
 	}
-	http.Error(w, "Service not available", http.StatusServiceUnavailable)
+	if traceID := r.Header.Get("X-Trace-Id"); traceID == "" {
+		r.Header.Set("X-Trace-Id", newTraceID())
+	}
+	peer.ReverseProxy.ServeHTTP(w, r)
 }
 
-func healthCheck() {
-	t := time.NewTicker(time.Second * 5)
+func newTraceID() string { return time.Now().UTC().Format("20060102T150405.000000000Z") }
+
+func healthCheck(stop <-chan struct{}, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	client := &http.Client{Timeout: healthTimeout}
+	check := func() {
+		for _, backend := range serverPool.backends {
+			backend.Check(client)
+		}
+	}
+	check()
 	for {
 		select {
-		case <-t.C:
-			for _, b := range serverPool.backends {
-				// Simulated health check logic
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = ctx // Used in real HTTP calls
-				b.SetAlive(true)
-				cancel()
-			}
+		case <-ticker.C:
+			check()
+		case <-stop:
+			return
 		}
 	}
 }
 
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics := map[string]interface{}{
-		"active_backends": len(serverPool.backends),
-		"status":          "operational",
+func handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	healthy := 0
+	for _, backend := range serverPool.backends {
+		if backend.IsAlive() {
+			healthy++
+		}
 	}
-	json.NewEncoder(w).Encode(metrics)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int{"configured_backends": len(serverPool.backends), "healthy_backends": healthy})
+}
+
+func configuredBackends(raw string) ([]*Backend, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("BACKENDS must contain at least one URL")
+	}
+	var backends []*Backend
+	for _, item := range strings.Split(raw, ",") {
+		parsed, err := url.Parse(strings.TrimSpace(item))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return nil, errors.New("BACKENDS contains an invalid URL")
+		}
+		backends = append(backends, &Backend{URL: parsed, Alive: false, ReverseProxy: httputil.NewSingleHostReverseProxy(parsed)})
+	}
+	return backends, nil
 }
 
 func main() {
-	// Setup dummy backends for the load balancer
-	urls := []string{"http://localhost:8081", "http://localhost:8082"}
-	for _, u := range urls {
-		parsedUrl, _ := url.Parse(u)
-		serverPool.backends = append(serverPool.backends, &Backend{
-			URL:          parsedUrl,
-			Alive:        true,
-			ReverseProxy: httputil.NewSingleHostReverseProxy(parsedUrl),
-		})
+	raw := os.Getenv("BACKENDS")
+	if raw == "" {
+		raw = "http://localhost:8081,http://localhost:8082"
 	}
-
-	go healthCheck()
-
+	backends, err := configuredBackends(raw)
+	if err != nil {
+		log.Fatal(err)
+	}
+	serverPool.backends = backends
+	stop := make(chan struct{})
+	go healthCheck(stop, 5*time.Second)
+	defer close(stop)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", lbHandler)
 	mux.HandleFunc("/metrics", handleMetrics)
-
-	log.Println("L7 Load Balancer running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	mux.HandleFunc("/", lbHandler)
+	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	log.Println("L7 load balancer listening on :8080")
+	log.Fatal(server.ListenAndServe())
 }
