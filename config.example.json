@@ -1,0 +1,8 @@
+{
+  "listen_addr": ":8080",
+  "health_interval_seconds": 5,
+  "backends": [
+    "http://app-1:8081",
+    "http://app-2:8082"
+  ]
+}
