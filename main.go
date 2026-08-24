@@ -3,14 +3,18 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -125,6 +129,15 @@ func handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]int{"configured_backends": len(serverPool.backends), "healthy_backends": healthy})
 }
 
+func handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	if serverPool.GetNextPeer() == nil {
+		http.Error(w, "no healthy backend", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
 func configuredBackends(raw string) ([]*Backend, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, errors.New("BACKENDS must contain at least one URL")
@@ -135,16 +148,41 @@ func configuredBackends(raw string) ([]*Backend, error) {
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 			return nil, errors.New("BACKENDS contains an invalid URL")
 		}
-		backends = append(backends, &Backend{URL: parsed, Alive: false, ReverseProxy: httputil.NewSingleHostReverseProxy(parsed)})
+		proxy := httputil.NewSingleHostReverseProxy(parsed)
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			http.Error(w, "upstream request failed", http.StatusBadGateway)
+		}
+		backends = append(backends, &Backend{URL: parsed, Alive: false, ReverseProxy: proxy})
 	}
 	return backends, nil
 }
 
-func main() {
-	raw := os.Getenv("BACKENDS")
-	if raw == "" {
-		raw = "http://localhost:8081,http://localhost:8082"
+func runHealthProbe(addr string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://127.0.0.1" + addr + "/healthz")
+	if err != nil {
+		return err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("health probe returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func main() {
+	listenAddr := flag.String("listen", envOr("LISTEN_ADDR", ":8080"), "HTTP listen address")
+	healthProbe := flag.Bool("healthcheck", false, "probe the local service and exit")
+	flag.Parse()
+
+	if *healthProbe {
+		if err := runHealthProbe(*listenAddr); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	raw := envOr("BACKENDS", "http://localhost:8081,http://localhost:8082")
 	backends, err := configuredBackends(raw)
 	if err != nil {
 		log.Fatal(err)
@@ -152,11 +190,35 @@ func main() {
 	serverPool.backends = backends
 	stop := make(chan struct{})
 	go healthCheck(stop, 5*time.Second)
-	defer close(stop)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", handleMetrics)
+	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", lbHandler)
-	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	log.Println("L7 load balancer listening on :8080")
-	log.Fatal(server.ListenAndServe())
+	server := &http.Server{
+		Addr:              *listenAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		log.Printf("Sky Edge Balancer listening on %s", *listenAddr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	close(stop)
+	_ = server.Close()
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }

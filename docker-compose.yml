@@ -1,0 +1,13 @@
+services:
+  balancer:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      BACKENDS: ${BACKENDS:-http://app1:8081,http://app2:8082}
+    healthcheck:
+      test: ["CMD", "/sky-edge-balancer", "-healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
